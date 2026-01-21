@@ -1,0 +1,213 @@
+Your system simulates real-time radar/ESM processing.
+A server streams pulse data (TOA, DOA, frequency, pulse width).
+A client receives pulses, computes PRI, clusters pulses using DBSCAN, converts clusters into emitters, then groups emitters into ships based on DOA and frequency span.
+Finally, a radar-style animated visualization shows radar, emitters, and ships.
+
+1️⃣ SERVER SIDE — DATA STREAMING (Radar Sensor)
+df = pd.read_csv("DF51.csv")
+
+
+📡 Loads recorded radar pulse data
+Each row = one pulse (TOA, DOA, frequency, pulse width)
+
+WINDOW_SIZE = 5000
+
+
+⏱ Simulates radar hardware buffering
+Every 5000 pulses = one time window
+
+window_df = df.iloc[i:i + WINDOW_SIZE]
+payload = pickle.dumps(window_df.to_dict("records"))
+
+
+📦 Converts pulse window into binary
+This simulates real-time sensor packetization
+
+conn.sendall(len(payload).to_bytes(8, "big") + payload)
+time.sleep(0.01)
+
+
+📡 Sends pulses with timing delay
+This mimics real radar streaming, not batch processing
+
+2️⃣ CLIENT RECEIVING — RAW PULSE INGESTION
+pulse_buffer = deque(maxlen=WINDOW_SIZE)
+
+
+🧠 Sliding memory buffer
+Only latest pulses are used for detection (realistic)
+
+toa = row["toa"]
+pri = toa - last_toa
+
+
+📐 PRI calculation
+
+Radar emitters are identified mainly by PRI behavior
+
+PRI is NOT given directly — you compute it (correct approach)
+
+pulse_buffer.append({
+    "doa": row["doa"],
+    "frequency": row["frequency"],
+    "pulse_width": row["pulse_width"],
+    "pri": pri
+})
+
+
+📊 Each pulse is now a feature vector:
+
+[DOA, Frequency, Pulse Width, PRI]
+
+
+This is exactly what an ESM receiver extracts.
+
+3️⃣ CLUSTERING — FROM PULSES → EMITTERS
+X = scaler.fit_transform(
+    df[["doa", "frequency", "pulse_width", "pri"]]
+)
+
+
+🔍 Feature normalization
+Why?
+
+DOA in degrees
+
+Frequency in MHz
+
+PRI in microseconds
+DBSCAN needs comparable scales
+
+labels = DBSCAN(eps=0.8, min_samples=20).fit_predict(X)
+
+
+🚨 CORE DETECTION STEP
+
+What DBSCAN is doing here:
+
+Finds dense pulse clouds
+
+Each dense cloud = one radar emitter
+
+Noise pulses = label -1
+
+This matches real radar emitter behavior:
+
+A radar emits thousands of pulses with similar parameters
+
+for cid in set(labels):
+    if cid == -1:
+        continue
+
+
+❌ Ignore noise
+Only real emitters survive
+
+4️⃣ EMITTER FORMATION — TRACKING RADAR SOURCES
+stats = {
+    "meanDOA": c["doa"].mean(),
+    "meanFreq": c["frequency"].mean(),
+    ...
+}
+
+
+📡 Each cluster → Emitter signature
+
+Mean DOA → direction of radar
+
+Mean Frequency → radar band
+
+Pulse count → emitter strength
+
+eid = associate_emitter(stats)
+
+
+🧠 Temporal association
+This checks:
+
+|DOA difference| < 5°
+|Frequency difference| < 20 MHz
+
+
+If matched → same emitter
+If not → new emitter
+
+✔ This prevents duplicate emitter creation
+
+update_emitter(eid, stats)
+
+
+📈 Smooth tracking using exponential averaging
+This models tracking filters used in ESM systems
+
+5️⃣ SHIP GROUPING — FROM EMITTERS → PLATFORMS
+
+This is the most important logic.
+
+SHIP_DOA_GATE = 5.0
+SHIP_FREQ_SPAN = 200.0
+
+
+🚢 Real naval ships:
+
+Have multiple radars
+
+All radars are co-located
+
+Frequencies differ, DOA nearly same
+
+doa_close = abs(e["meanDOA"] - ship["meanDOA"]) < SHIP_DOA_GATE
+
+
+📐 Same bearing ⇒ same ship
+
+freq_span_ok = (combined_max_freq - combined_min_freq) < SHIP_FREQ_SPAN
+
+
+📡 Frequency diversity constraint
+Prevents grouping radars from different ships
+
+ship["emitters"].append(eid)
+
+
+🚢 Ship = collection of emitters
+
+This is platform-level identification, not just emitter detection.
+
+6️⃣ VISUALIZATION — WHAT YOU SEE
+Radar
+ax.scatter(0, 0, c="lime")
+
+
+📡 Ownship / coastal radar
+
+Radar sweep
+theta += 0.03
+
+
+🟢 Continuous scan
+Exactly like PPI display
+
+Emitters
+intensity = 1 + 0.7 * sin(...)
+
+
+🔴 Emitters blink
+Matches pulse transmission behavior
+
+Ships
+circle = plt.Circle(...)
+
+
+🚢 Ships drawn as group boundaries
+Each boundary encloses multiple emitters
+
+Ship drift
+circle.center = (cx + dx, cy + dy)
+
+
+🌊 Sea motion realism
+Important for demonstration credibility
+
+🧠 FINAL DATA FLOW (ONE LINE)
+Pulses → Feature Vectors → DBSCAN Clusters → Emitters → Ship Grouping → Radar Display
